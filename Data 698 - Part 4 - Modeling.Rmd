@@ -1,0 +1,968 @@
+---
+title: "Data 698 - Part 3: Modeling"
+author: "S. Tinapunan"
+date: '2022-06-10'
+output:
+  html_document:
+    df_print: paged
+    theme: cerulean
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+---
+
+
+### Data and Results Published in Research Paper 
+
+Below are the saved CSV files for the data used to generate the results published in the paper. 
+
+- Training-Testing dataset: Paper Data/paper_train_test_20k.csv
+- Training set: Paper Data/paper_train_20k.csv
+- Testing set: Paper Data/paper_test_20k.csv
+- Sampled training sets: 
+- Paper Data/sampled training sets/undersampling_20k.csv
+- Paper Data/sampled training sets/both_20k.csv
+- Paper Data/sampled training sets/rwo_20k.csv
+- Paper Data/sampled training sets/smote_20k.csv
+- Paper Data/sampled training sets/mwmote_20k.csv
+- Paper Data/sampled training sets/adasyn_20k.csv
+- Results:Paper Data/Results_test_train_20k_A.csv
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(plyr) #for loading multiple files
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(tidyr) #replace_na
+library(DataExplorer)
+library(psych)
+library(ggplot2)
+library(hrbrthemes) #ggplot2 theme
+library(mice)
+library(DT)
+library(knitr)
+library(corrplot)
+library(usdm) #vif
+library(caret)
+library(ROSE)#under and oversampling
+library(rpart)
+library(pROC)
+library(rpart.plot)
+library(randomForest)
+library(e1071)
+library(gbm)
+library(imbalance) #synthetic oversampling
+library(C50)
+library(ggplot2)
+```
+
+Load Data
+
+Data was prepared in the previous step.  Load both the scaled and none-scaled versions fo the data set. 
+
+```{r}
+#read transaction data
+transactions <- read.csv("Data/transactions_scaled_final.csv", na.strings=c("NA","NaN", " ", "\\N"), stringsAsFactors = TRUE)
+#remove first column (no data)
+transactions$X <- NULL 
+
+#convert class to factor
+transactions$class <- factor(transactions$class)
+
+skim(transactions)
+```
+
+
+---
+
+Plot of data by time and number of daily transactions per customer.
+
+```{r}
+  ggplot(transactions, aes(x = time_from_refDate, y = trans_count_d, color=class)) +
+  geom_point()
+```
+
+There are 2,291 positive cases and 301,562 negative cases in the entire data set.  
+
+```{r}
+table(transactions$class)
+```
+
+The proportional distribution is 99.24% negative cases and 0.75% positive cases. As you can see, the data set is significantly imbalanced. 
+
+```{r}
+prop.table(table(transactions$class))
+```
+
+<br/> 
+
+There there three areas where transactions originate. For training and testing, majority class transactions from each source are going to be randomly selected. About 74.06% of are coming from source *E*, 21.56% from *H*, and 4.42% from *W*. 
+
+
+```{r}
+set.seed(36)
+generate_traintest <- function(size){
+  
+total <- nrow(transactions)
+sys_source_dist <- NULL
+sys_source_dist$H <- transactions %>% filter(source_H==1) %>% summarise((n=n()))/total
+sys_source_dist$E <- transactions %>% filter(source_E==1) %>% summarise((n=n()))/total
+sys_source_dist$W <- transactions %>% filter(source_E!=1 & source_H !=1) %>% summarise((n=n()))/total
+sys_source_dist <- as.data.frame(sys_source_dist)
+names(sys_source_dist) <- c("H", "E", "W")
+
+train_test_size <- size
+#calculate majority size 
+majority_size = train_test_size - transactions %>% filter(class==1) %>% summarize(n=n())
+#calculate size of each distribution
+H_size = round(majority_size$n * sys_source_dist$H) 
+E_size = round(majority_size$n * sys_source_dist$E)
+W_size = round(majority_size$n * sys_source_dist$W) 
+#Filter 
+trans_H <- transactions %>% filter(source_H==1 & class==0)
+trans_E <- transactions %>% filter(source_E==1 & class==0) 
+trans_W <- transactions %>% filter(source_E!=1 & source_H !=1 & class==0)
+#get majority class by randomly sampling 
+train_test_majority <- 
+  rbind(trans_H[sample(nrow(trans_H), H_size, replace=FALSE), ], 
+  trans_E[sample(nrow(trans_E), E_size, replace=FALSE), ], 
+  trans_W[sample(nrow(trans_W), W_size, replace=FALSE), ])
+#get minority class 
+train_test_minority <- transactions %>% filter(class==1)
+#bind both minority and majority class 
+train_test <- rbind(train_test_majority, train_test_minority)
+return(train_test)
+}
+```
+
+
+Only run this section if you want to update your files. 
+
+```{r}
+#use this to write the current train_test to file 
+create_new = FALSE
+
+if(create_new==TRUE){
+  #write the 5k rows
+  write.csv(generate_traintest(5000), "Data/train_test_5k.csv")
+  #write the 10k rows
+  write.csv(generate_traintest(20000), "Data/train_test_20k.csv")
+  #write the 30k rows
+  write.csv(generate_traintest(30000), "Data/train_test_30k.csv")
+  write.csv(generate_traintest(35000), "Data/train_test_35k.csv")
+  write.csv(generate_traintest(40000), "Data/train_test_40k.csv")
+  #write the 50k rows
+  write.csv(generate_traintest(50000), "Data/train_test_50k.csv")
+  #write 100k
+  write.csv(generate_traintest(100000), "Data/train_test_100k.csv")
+}
+```
+
+
+---
+
+Load train/test saved data files. Only the 20k training-testing file was used. 
+
+```{r}
+#train_test_5k <- read.csv("Data/train_test_5k_A.csv")
+#train_test_5k$class <- factor(train_test_5k$class)
+
+train_test_20k <- read.csv("Data/train_test_20k_A.csv")
+train_test_20k$class <- factor(train_test_20k$class)
+
+#train_test_30k <- read.csv("Data/train_test_30k_A.csv")
+#train_test_30k$class <- factor(train_test_30k$class)
+
+#train_test_35k <- read.csv("Data/train_test_35k_A.csv")
+#train_test_35k$class <- factor(train_test_35k$class)
+
+#train_test_40k <- read.csv("Data/train_test_40k_A.csv")
+#train_test_40k$class <- factor(train_test_40k$class)
+
+#train_test_50k <- read.csv("Data/train_test_50k_A.csv")
+#train_test_50k$class <- factor(train_test_50k$class)
+
+#train_test_100k <- read.csv("Data/train_test_100k_A.csv")
+#train_test_100k$class <- factor(train_test_100k$class)
+```
+
+Check distribution of train_test data set based on different sizes. 
+
+```{r}
+#table(train_test_5k$class)
+table(train_test_20k$class)
+#table(train_test_30k$class)
+#table(train_test_50k$class)
+#table(train_test_100k$class)
+
+#prop.table(table(train_test_5k$class))
+prop.table(table(train_test_20k$class))
+#prop.table(table(train_test_30k$class))
+#prop.table(table(train_test_50k$clas))
+#prop.table(table(train_test_100k$class))
+```
+
+
+Stratified Partitioning of `train_test` 
+
+The function `createDataPartition` of the `caret` package is used to split the `train_test` data frame into train and test. This function performs a *stratified* random sampling within each class, which should preserve the overall class distribution of the data. 
+
+
+```{r}
+#train_5k <- NULL
+#test_5k <- NULL
+
+train_20k <- NULL
+test_20k <- NULL
+
+#train_30k <- NULL
+#test_30k <- NULL
+
+#train_35k <- NULL
+#test_35k <- NULL
+
+#train_40k <- NULL
+#test_40k <- NULL
+
+#train_50k <- NULL
+#test_50k <- NULL
+
+#train_100k <- NULL
+#test_100k <- NULL
+
+set_train_set <- function(id){
+  train_test <- NULL
+  if(id=="5k"){train_test <- train_test_5k}
+  if(id=="20k"){train_test <- train_test_20k}
+  if(id=="30k"){train_test <- train_test_30k}
+  if(id=="35k"){train_test <- train_test_35k}
+  if(id=="40k"){train_test <- train_test_40k}
+  if(id=="50k"){train_test <- train_test_50k}
+  if(id=="100k"){train_test <- train_test_100k}
+  
+  #create ID column
+  #train_test$id <- 1:nrow(train_test)
+  #make reproducible
+  set.seed(36)
+  #performs stratified random split/ random sampling occurs within each class and should 
+  #preserve the overall class distribution of the data
+  train_index <- caret::createDataPartition(train_test$class, p = .8, list = FALSE,  times = 1)
+  train <- train_test[train_index,]
+  test  <- train_test[-train_index,]
+  #factor
+  train$class <- factor(train$class)
+  test$class <- factor(test$class)
+
+  if(id=="5k"){
+    train_5k <<- train
+    test_5k <<- test
+  }
+  if(id=="20k"){
+    train_20k <<- train
+    test_20k <<- test
+  }
+   if(id=="30k"){
+    train_30k <<- train
+    test_30k <<- test
+   }
+   if(id=="35k"){
+    train_35k <<- train
+    test_35k <<- test
+   }
+   if(id=="40k"){
+    train_40k <<- train
+    test_40k <<- test
+  }
+  if(id=="50k"){
+    train_50k <<- train
+    test_50k <<- test
+  }
+  if(id=="100k"){
+    train_100k <<- train
+    test_100k <<- test
+  }}
+
+#call the function (only 20k was used)
+#set_train_set("5k")
+set_train_set("20k")
+#set_train_set("30k")
+#set_train_set("35k")
+#set_train_set("40k")
+#set_train_set("50k")
+#set_train_set("100k")
+
+#train_5k$X <- NULL
+#test_5k$X <- NULL
+
+train_20k$X <- NULL
+test_20k$X  <- NULL
+
+train_30k$X <- NULL
+test_30k$X  <- NULL
+
+#train_35k$X <- NULL
+#test_35k$X  <- NULL
+
+#train_40k$X <- NULL
+#test_40k$X  <- NULL
+
+#train_50k$X <- NULL
+#test_50k$X <- NULL
+
+#train_100k$X <- NULL
+#test_100k$X <- NULL
+```
+
+Distribution of train
+
+```{r}
+#prop.table(table(train_5k$class))
+prop.table(table(train_20k$class))
+#prop.table(table(train_30k$class))
+#prop.table(table(train_35k$class))
+#prop.table(table(train_40k$class))
+#prop.table(table(train_50k$class))
+#prop.table(table(train_100k$class))
+```
+
+
+```{r}
+#prop.table(table(test_5k$class))
+prop.table(table(test_20k$class))
+#prop.table(table(test_30k$class))
+#prop.table(table(test_35k$class))
+#prop.table(table(test_40k$class))
+#prop.table(table(test_50k$class))
+#prop.table(table(test_100k$class))
+```
+
+Generate samples from different sampling algorithms. 
+
+```{r}
+
+  list_train_samples_20k <- NULL
+  #list_train_samples_30k <- NULL
+  #list_train_samples_35k <- NULL
+  #list_train_samples_40k <- NULL
+  #list_train_samples_50k <- NULL
+  #list_train_samples_100k <- NULL
+  train <- NULL
+  
+  #sizes <- list("20k", "30k", "35k", "40k", "50k", "100k")
+  #sizes <- list("20k", "30k", "35k", "40k", "50k")
+  #sizes <- list("20k", "30k")
+  #only 20k was used
+  sizes <- list("20k", "30k")
+  
+  for(x in sizes)
+  {
+    
+  id=x
+    
+  if(id=="20k"){train <- train_20k}
+  if(id=="30k"){train <- train_30k}
+  if(id=="35k"){train <- train_35k}
+  if(id=="40k"){train <- train_40k}
+  if(id=="50k"){train <- train_50k}
+  if(id=="100k"){train <- train_100k}
+    
+  train_under <- ovun.sample(class ~ ., data=train , p=0.5, seed=36, method="under")$data
+  train_both <- ovun.sample(class ~ ., data=train , p=0.5, seed=36, method="both")$data
+  train_rwo <- oversample(train, ratio = 0.5, method = "RWO", classAttr = "class")
+  train_smote <- oversample(train, ratio = 0.5, method = "SMOTE", classAttr = "class")
+  train_mwmote <- oversample(train, ratio = 0.5, method = "MWMOTE", classAttr = "class")
+  train_adasyn <- oversample(train, ratio = 0.5, method = "ADASYN", classAttr = "class")
+  
+  list_samples <- list("under"=train_under,"both"=train_both, "rwo"=train_rwo,
+                       "smote"=train_smote, "mwmote"=train_mwmote,"adasyn"=train_adasyn)
+  
+  if(id=="20k"){list_train_samples_20k <- list_samples}
+  if(id=="30k"){list_train_samples_30k <- list_samples}
+  if(id=="35k"){list_train_samples_35k <- list_samples}
+  if(id=="40k"){list_train_samples_40k <- list_samples}
+  if(id=="50k"){list_train_samples_50k <- list_samples}
+  if(id=="100k"){list_train_samples_100k <- list_samples}
+  }
+```
+
+```{r}
+                           under |both   |rwo     |smote   |mwmote  |adasyn
+list_train_samples_20k    #3,659 |16,001 |21,252  |21,252  |21,252  |21,252
+#list_train_samples_30k   #3,659 |24,001 |33,252  |33,252  |33,252  |33,252
+#list_train_samples_35k   #3,659 |28,001 |39,252  |39,252  |39,252  |39,252
+#list_train_samples_40k   #3,659 |32,001 |45,252  |45,252  |45,252  |45,252
+#list_train_samples_50k   #3,659 |40,001 |57,252  |57,252  |57,252  |57,252
+#list_train_samples_100k  #3,659 |80,001 |117,252 |117,252 |117,252 |117,252
+```
+
+Build the models. This may take a long time to run depending on the size of the train set. 
+
+```{r}
+library(C50)
+library(rpart)
+library(randomForest)
+library(e1071)
+
+####################################################################################################
+# This procedure will generate the following lists that contains the models for each sampling type #
+####################################################################################################
+# list_m_under:   models that use undersampled training set
+# list_m_both:    models that use both under and over sampled training set
+# list_m_rwo:     models that use random walk sampled  training set
+# list_m_smote:   models that use smote sampled training set
+# list_m_mwmote:  models that use mwmote sampled training set
+# list_m_adasyn:  models that use adasyn sampled training set
+
+
+#enter the size you want to use in the model 
+#only run one set at a time
+#only 20k was used 
+train_test_size <- "20k" #<---INPUT 
+
+#select samples to use by size
+if(train_test_size=="20k"){
+  samples <- list_train_samples_20k #must match the test_train_size
+}
+if(train_test_size=="30k"){
+  samples <- list_train_samples_30k #must match the test_train_size
+}
+
+#these are the different samples we have 
+list_samples <- list("under", "both", "rwo", "smote", "mwmote", "adasyn")
+
+list_m_under <- NULL
+list_m_both <- NULL
+list_m_rwo <- NULL
+list_m_smote <- NULL
+list_m_mwmote <- NULL
+list_m_adasyn <- NULL
+
+for(x in list_samples){ 
+  
+  if(x=="under"){train <- samples$under}
+  if(x=="both"){train <- samples$both}
+  if(x=="rwo"){train <- samples$rwo}
+  if(x=="smote"){train <- samples$smote}
+  if(x=="mwmote"){train <- samples$mwmote}
+  if(x=="adasyn"){train <- samples$adasyn}
+  
+  print(paste("X is now", x))
+  
+  #classification Tree with C5.0
+  print("calculating classification tree")
+  mod_C50_tree <- C5.0(x = train[, 2:26], y = train$class)
+  print("calculating classification tree boosted")
+  mod_C50_tree_boosted <- C5.0(x = train[, 2:26], y = train$class, trials = 10)
+    
+  #Classification with CART
+  print("calculating CART")
+  mod_CART <- rpart(class ~. , method="class", data=train)
+  print("calculating CART Prune")
+  mod_CART_prune <- prune(mod_CART, cp = mod_CART$cptable[which.min(mod_CART$cptable[,"xerror"]),"CP"])
+  #note:select the complexity parameter associated with minimum error, and place it into the prune()
+  #source: https://www.statmethods.net/advstats/cart.html
+  
+  #random Forest
+  print("calculating Random Forest")
+  mod_RF <- randomForest(class ~ ., data = train, proximity = TRUE)
+  
+  #SVM
+  print("calculating SVM linear")
+  mod_SVM_linear = svm(class ~ ., data = train, type = 'C-classification', kernel = 'linear')
+  print(print("calculating Radial"))
+  mod_SVM_rbf = svm(class ~ ., data = train, type = 'C-classification', kernel = 'radial')
+  
+  print("Setting under")
+  if(x=="under"){
+  list_m_under = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+  
+  print("Setting both")
+  if(x=="both"){
+  list_m_both = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+
+  print("Setting rwo")
+  if(x=="rwo"){
+  list_m_rwo = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+  
+  print("Setting smote")
+  if(x=="smote"){
+  list_m_smote = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+
+  print("Setting mwmote")
+  if(x=="mwmote"){
+  list_m_mwmote = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+
+  print("Setting adasyn")
+  if(x=="adasyn"){
+  list_m_adasyn = list("mod_C50_tree"= mod_C50_tree,
+                  "mod_C50_tree_boosted" = mod_C50_tree_boosted, 
+                  "mod_CART" = mod_CART, 
+                  "mod_CART_prune" = mod_CART_prune, 
+                  "mod_RF" = mod_RF, 
+                  "mod_SVM_linear" = mod_SVM_linear, 
+                  "mod_SVM_rbf" = mod_SVM_rbf)}
+  
+  print("reached end of this itiration")
+  
+  
+}
+
+##############
+#   OUTPUT   #
+##############
+list_m_under   #contains 7 models
+list_m_both    #contains 7 models
+list_m_rwo     #contains 7 models
+list_m_smote   #contains 7 models
+list_m_mwsmote #contains 7 models
+list_m_adasyn  #contains 7 models
+```
+
+
+Predictions
+
+Run predictions for one set a time only. Only recognizes 20k and 30k set. 
+
+```{r}
+
+####################################################################################################
+# This procedure will generate the following data frames for predictions for each sample-model set #
+####################################################################################################
+# predictions_under:   models that use undersampled training set
+# predictions_both:    models that use both under and over sampled training set
+# predictions_rwo:     models that use random walk sampled  training set
+# predictions_smote:   models that use smote sampled training set
+# predictions_mwmote:  models that use mwmote sampled training set
+# predictions_adasyn:  models that use adasyn sampled training set
+
+#call only for the current models in the "list_m_xxxx" object 
+size = "20k"  #<---INPUT current size in sample-models list (list_m_xxxx)
+
+#only handles "20k" size for now
+if(size=="20k"){test <- test_20k} else{test <- NULL} 
+
+models_under <- list_m_under
+models_both <- list_m_both
+models_rwo <- list_m_rwo
+models_smote <- list_m_smote
+models_mwmote <- list_m_mwmote
+models_adasyn <- list_m_adasyn
+
+#models is for a given sampling algorithm 
+#returns a data frame with the predictions
+get_predictions <- function(models)
+{
+  df_pred <- NULL
+  index <- 1
+  for (model in models)
+  {
+  
+    pred <- predict(model, newdata = test[-1], type="class")
+    
+    if(names(models)[index]=="mod_C50_tree"){df_pred$mod_C50_tree <- pred}
+    if(names(models)[index]=="mod_C50_tree_boosted"){df_pred$mod_C50_tree_boosted <- pred}
+    if(names(models)[index]=="mod_CART"){df_pred$mod_CART <- pred}
+    if(names(models)[index]=="mod_CART_prune"){df_pred$mod_CART_prune <- pred}
+    if(names(models)[index]=="mod_RF"){df_pred$mod_RF <- pred}
+    if(names(models)[index]=="mod_SVM_linear"){df_pred$mod_SVM_linear <- pred}
+    if(names(models)[index]=="mod_SVM_rbf"){df_pred$mod_SVM_rbf <- pred}
+       
+    index <- index + 1 
+  
+  }
+  return(df_pred)
+}
+
+threshold <- 0.5 
+
+#Predictions for models using undersampling 
+predictions_under <- get_predictions(models_under)
+head(predictions_under$mod_C50_tree)
+head(predictions_under$mod_C50_tree_boosted)
+head(predictions_under$mod_CART) #need to be evaluated with threshold
+head(predictions_under$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_under$mod_RF)
+head(predictions_under$mod_SVM_linear)
+head(predictions_under$mod_SVM_rbf)
+
+#Predictions for models using both undersampling and oversampling 
+predictions_both <- get_predictions(models_both)
+head(predictions_both$mod_C50_tree)
+head(predictions_both$mod_C50_tree_boosted)
+head(predictions_both$mod_CART)#need to be evaluated with threshold
+head(predictions_both$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_both$mod_RF)
+head(predictions_both$mod_SVM_linear)
+head(predictions_both$mod_SVM_rbf)
+
+#Predictions for models using rwo
+predictions_rwo <- get_predictions(models_rwo)
+head(predictions_rwo$mod_C50_tree)
+head(predictions_rwo$mod_C50_tree_boosted)
+head(predictions_rwo$mod_CART) #need to be evaluated with threshold
+head(predictions_rwo$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_rwo$mod_RF)
+head(predictions_rwo$mod_SVM_linear)
+head(predictions_rwo$mod_SVM_rbf)
+
+#Predictions for models using smote
+predictions_smote <- get_predictions(models_smote)
+head(predictions_smote$mod_C50_tree)
+head(predictions_smote$mod_C50_tree_boosted)
+head(predictions_smote$mod_CART) #need to be evaluated with threshold
+head(predictions_smote$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_smote$mod_RF)
+head(predictions_smote$mod_SVM_linear)
+head(predictions_smote$mod_SVM_rbf)
+
+#Predictions for models using mwmote
+predictions_mwmote <- get_predictions(models_mwmote)
+head(predictions_mwmote$mod_C50_tree)
+head(predictions_mwmote$mod_C50_tree_boosted)
+head(predictions_mwmote$mod_CART) #need to be evaluated with threshold
+head(predictions_mwmote$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_mwmote$mod_RF)
+head(predictions_mwmote$mod_SVM_linear)
+head(predictions_mwmote$mod_SVM_rbf)
+
+#Predictions for models using adasyn
+predictions_adasyn <- get_predictions(models_adasyn)
+head(predictions_adasyn$mod_C50_tree)
+head(predictions_adasyn$mod_C50_tree_boosted)
+head(predictions_adasyn$mod_CART) #need to be evaluated with threshold
+head(predictions_adasyn$mod_CART_prune) #need to be evaluated with threshold
+head(predictions_adasyn$mod_RF)
+head(predictions_adasyn$mod_SVM_linear)
+head(predictions_adasyn$mod_SVM_rbf)
+
+
+####################################################################################################
+# OUTPUT: Predictions for each sample-model combination  (7 models each sampling set)              #
+####################################################################################################
+# predictions_under:   models that use undersampled training set
+# predictions_both:    models that use both under and over sampled training set
+# predictions_rwo:     models that use random walk sampled  training set
+# predictions_smote:   models that use smote sampled training set
+# predictions_mwmote:  models that use mwmote sampled training set
+# predictions_adasyn:  models that use adasyn sampled training set
+
+```
+
+
+Get the confusion matrix for each model 
+
+```{r}
+size = "20k"  #<---INPUT current size in sample-models list (list_m_xxxx)
+#only handles "20k" size for now
+if(size=="20k"){
+  test <- test_20k
+  test$class <- factor(test$class)} else{test <- NULL} 
+
+cm_pred_mod_C50_tree <- NULL
+cm_pred_mod_C50_tree_boosted <- NULL
+cm_pred_mod_CART <- NULL
+cm_pred_mod_CART_prune <- NULL
+cm_pred_mod_RF <- NULL
+cm_pred_mod_SVM_linear <- NULL
+cm_pred_mod_SVM_radial <- NULL 
+
+#get the confusion matrix for each model for each of the samplings
+model_names = c("mod_C50_tree", "mod_C50_tree_boosted", "mod_CART", "mod_CART_prune", "mod_RF", "mod_SVM_linear", "mod_SVM_rbf")
+index = c(1:length(model_names))
+
+for(x in index){
+    
+    cm <- NULL
+    print(paste("index is ", index))
+    
+    index <- 5
+    
+    cm$under <- confusionMatrix(data=as.data.frame(predictions_under)[, c(model_names[index])], reference=test$class, positive="1")
+    print("under done")
+    cm$both <- confusionMatrix(data=as.data.frame(predictions_both)[, c(model_names[index])], reference=test$class, positive="1")
+    print("both done")
+    cm$rwo <- confusionMatrix(data=as.data.frame(predictions_rwo)[, c(model_names[index])], reference=test$class, positive="1")
+    print("rwo done")
+    cm$smote <- confusionMatrix(data=as.data.frame(predictions_smote)[, c(model_names[index])], reference=test$class, positive="1")
+    print("smote done")
+    cm$mwmote <- confusionMatrix(data=as.data.frame(predictions_mwmote)[, c(model_names[index])], reference=test$class, positive="1")
+    print("mwmote done")
+    cm$adasyn <- confusionMatrix(data=as.data.frame(predictions_adasyn)[, c(model_names[index])], reference=test$class, positive="1")
+    print("adasyn done")
+    
+    if(model_names[index] == "mod_C50_tree"){cm_pred_mod_C50_tree <- cm}
+    if(model_names[index] == "mod_C50_tree_boosted"){cm_pred_mod_C50_tree_boosted <- cm}
+    if(model_names[index] == "mod_CART"){cm_pred_mod_CART <- cm}
+    if(model_names[index] == "mod_CART_prune"){cm_pred_mod_CART_prune <- cm}
+    if(model_names[index] == "mod_RF"){cm_pred_mod_RF <- cm}
+    if(model_names[index] == "mod_SVM_linear"){cm_pred_mod_SVM_linear <- cm}
+    if(model_names[index] == "mod_SVM_rbf"){cm_pred_mod_SVM_radial <- cm}
+    cm
+}
+```
+
+Check confusion matrix
+
+```{r}
+cm_pred_mod_C50_tree
+cm_pred_mod_C50_tree_boosted
+cm_pred_mod_CART
+cm_pred_mod_CART_prune
+cm_pred_mod_SVM_linear
+cm_pred_mod_SVM_radial
+cm_pred_mod_RF
+```
+
+
+Build results tables. 
+
+```{r}
+
+#C5.0 Tree
+
+C50_tree <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_C50_tree$under, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree$both, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree$smote, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree$adasyn, what = "classes")))
+names(C50_tree) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+C50_tree$MODEL <- "C5.0"
+C50_tree$METRIC <- row.names(C50_tree)
+C50_tree %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> C50_tree
+
+#C5.0 Boosted Tree
+C50_tree_boosted <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_C50_tree_boosted$under, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree_boosted$both, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree_boosted$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree_boosted$smote, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree_boosted$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_C50_tree_boosted$adasyn, what = "classes")))
+names(C50_tree_boosted) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+C50_tree_boosted$MODEL <- "C5.0 Boosted"
+C50_tree_boosted$METRIC <- row.names(C50_tree_boosted)
+C50_tree_boosted %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> C50_tree_boosted
+
+#CART
+CART <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_CART$under, what = "classes"),
+    as.matrix(cm_pred_mod_CART$both, what = "classes"),
+    as.matrix(cm_pred_mod_CART$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_CART$smote, what = "classes"),
+    as.matrix(cm_pred_mod_CART$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_CART$adasyn, what = "classes")))
+names(CART) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+CART$MODEL <- "CART"
+CART$METRIC <- row.names(CART)
+CART %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> CART
+
+#Pruned CART
+CART_prune <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_CART_prune$under, what = "classes"),
+    as.matrix(cm_pred_mod_CART_prune$both, what = "classes"),
+    as.matrix(cm_pred_mod_CART_prune$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_CART_prune$smote, what = "classes"),
+    as.matrix(cm_pred_mod_CART_prune$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_CART_prune$adasyn, what = "classes")))
+names(CART_prune) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+CART_prune$MODEL <- "CART pruned"
+CART_prune$METRIC <- row.names(CART_prune)
+CART_prune %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> CART_prune
+
+
+#Random Forest
+RF <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_RF$under, what = "classes"),
+    as.matrix(cm_pred_mod_RF$both, what = "classes"),
+    as.matrix(cm_pred_mod_RF$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_RF$smote, what = "classes"),
+    as.matrix(cm_pred_mod_RF$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_RF$adasyn, what = "classes")))
+names(RF) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+RF$MODEL <- "Random Forest"
+RF$METRIC <- row.names(RF)
+RF %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> RF
+
+
+
+#SVM Linear
+SVM_linear <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_SVM_linear$under, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_linear$both, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_linear$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_linear$smote, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_linear$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_linear$adasyn, what = "classes")))
+names(SVM_linear) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+SVM_linear$MODEL <- "SVM linear"
+SVM_linear$METRIC <- row.names(SVM_linear)
+SVM_linear %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> SVM_linear
+
+
+#SVM Radial
+SVM_radial <- 
+    as.data.frame(cbind(
+    as.matrix(cm_pred_mod_SVM_radial$under, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_radial$both, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_radial$rwo, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_radial$smote, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_radial$mwmote, what = "classes"),
+    as.matrix(cm_pred_mod_SVM_radial$adasyn, what = "classes")))
+names(SVM_radial) <- c("UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN")
+SVM_radial$MODEL <- "SVM Radial"
+SVM_radial$METRIC <- row.names(SVM_radial)
+SVM_radial %>% dplyr::select("MODEL", "METRIC", "UNDER", "BOTH", "RWO", "SMOTE", "MWMOTE", "ADASYN") -> SVM_radial
+
+```
+
+Combine results. 
+
+```{r}
+results <- 
+    rbind( 
+      C50_tree,
+      C50_tree_boosted,
+      CART,
+      CART_prune,
+      RF,
+      SVM_linear,
+      SVM_radial
+    )
+results
+
+#do not overwrite existing results
+#write.csv(results, "Data/Results_test_train_20k_A.csv")
+
+dim(C50_tree)
+dim(C50_tree_boosted)
+dim(CART)
+dim(CART_prune)
+dim(RF)
+dim(SVM_linear)
+dim(SVM_radial)
+
+```
+
+
+```{r}
+table(train$class)
+```
+
+Confusion Matrix of Random Forest with Undersampling 
+
+```{r}
+cm_pred_mod_RF$under$table
+```
+
+Confusion Matrix of C5.0 with boosting with Undersampling
+
+```{r}
+cm_pred_mod_C50_tree_boosted$under$table
+```
+
+Confusion Matrix of SVM RBF with RWO
+
+```{r}
+cm_pred_mod_SVM_radial$rwo$table
+```
+
+Variable of Importance for Random Forest
+
+```{r fig.height=5, fig.width=5, echo=FALSE}
+#source: https://stackoverflow.com/questions/36228559/plotting-varimp-in-r
+V = caret::varImp(list_m_under$mod_RF)
+ggplot2::ggplot(V, aes(x=reorder(rownames(V),Overall), y=Overall)) +
+geom_point( color="blue", size=4, alpha=0.6)+
+geom_segment( aes(x=rownames(V), xend=rownames(V), y=0, yend=Overall), 
+color='skyblue') +
+xlab('Variable')+
+ylab('Overall Importance')+
+theme_light() +
+coord_flip() 
+```
+
+
+Variable of Importance for C5.0 with boosting 
+
+```{r fig.height=5, fig.width=5, echo=FALSE}
+#source: https://stackoverflow.com/questions/36228559/plotting-varimp-in-r
+V = caret::varImp(list_m_under$mod_C50_tree_boosted)
+ggplot2::ggplot(V, aes(x=reorder(rownames(V),Overall), y=Overall)) +
+geom_point( color="blue", size=4, alpha=0.6)+
+geom_segment( aes(x=rownames(V), xend=rownames(V), y=0, yend=Overall), 
+color='skyblue') +
+xlab('Variable')+
+ylab('Overall Importance')+
+theme_light() +
+coord_flip() 
+```
+
+Save the datasets used for the paper. 
+
+```{r}
+
+#this is the stratified sampling of the main dataset that's used to build the training and test sets
+#write.csv(train_test_20k, "Paper/paper_train_test_20k.csv")
+
+#save the train, test, and sampled training sets used by the paper 
+#this is the main train set that's used for the different samplings 
+#write.csv(train_20k, "Paper/paper_train_20k.csv")
+
+
+#this is the test set used for the paper
+#write.csv(test_20k, "Paper/paper_test_20k.csv")
+
+#save the sampled train sets that's used by the paper
+#write.csv(list_train_samples_20k$under, "Paper/undersampling_20k.csv")
+#write.csv(list_train_samples_20k$both, "Paper/both_20k.csv")
+#write.csv(list_train_samples_20k$rwo, "Paper/rwo_20k.csv")
+#write.csv(list_train_samples_20k$smote, "Paper/smote_20k.csv")
+#write.csv(list_train_samples_20k$mwmote, "Paper/mwmote_20k.csv")
+#write.csv(list_train_samples_20k$adasyn, "Paper/adasyn_20k.csv")
+```
+
+

@@ -1,0 +1,370 @@
+---
+title: "Data 698 - Part 3: Data Exploration and Feature Selection"
+author: "S. Tinapunan"
+date: '2022-06-10'
+output:
+  html_document:
+    df_print: paged
+    theme: cerulean
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(plyr) #for loading multiple files
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(tidyr) #replace_na
+library(DataExplorer)
+library(psych)
+library(ggplot2)
+library(hrbrthemes) #ggplot2 theme
+library(mice)
+library(DT)
+library(knitr)
+library(corrplot)
+library(usdm) #vif
+library(caret)
+```
+
+
+### Load the data
+
+Data was prepared in the previous step.  
+
+```{r}
+#read transaction data
+#transactions <- read.csv("Data/transformed_imputed.csv", na.strings=c("NA","NaN", " ", "\\N"), stringsAsFactors = TRUE)
+transactions_scaled <- read.csv("Data/transformed_imputed_scaled.csv", na.strings=c("NA","NaN", " ", "\\N"), stringsAsFactors = TRUE)
+#some code refers to transactions (have them point to the same data) | final file used for processing is scaled version
+transactions <- transactions_scaled
+#set class as factor
+transactions$class <- factor(transactions$class)
+transactions_scaled$class <- factor(transactions_scaled$class)
+#remove X column (no data)
+transactions$X <- NULL
+transactions_scaled$X <- NULL
+```
+
+---
+
+<br/> 
+
+### Summary 
+
+```{r echo=FALSE}
+skim(transactions)
+```
+
+```{r echo=FALSE}
+datatable(head(transactions))
+```
+
+<br/> 
+
+### Distribution of `Class`
+
+<br/>
+
+Data set has 303,853rows with 32 predictor variables. All missing data were imputed in the previous step.  A `class` of ` indicates anomalous activity; otherwise, 0. All categorical data were transformed into numerical. Approximately 2,291 transactions out of 303,853 (0.75 percent) are classified as anomalous. As expected, there is a significant class imbalance in the data set. 
+
+```{r echo=FALSE}
+kable(table(transactions$class))
+```
+
+We see significant class imbalance, as expected. 
+
+```{r echo=FALSE}
+barplot(prop.table(table(transactions$class)))
+```
+
+
+```{r echo=FALSE}
+#separate variables into class 1 and 0
+transactions %>% filter(class==1) -> trans1
+transactions %>% filter(class==0) -> trans0
+#separate variables into class 1 and 0
+transactions_scaled %>% filter(class==1) -> trans_s1
+transactions_scaled %>% filter(class==0) -> trans_s0
+```
+
+---
+
+<br/>
+
+### Distribution of Variables When `class` is 0 (normal transactions)
+
+Below shows distribution of numerical variables when `class` is 0, which indicates normal transactions. 
+
+`trans_count_d` (no. of daily transactions associated with a customer profile) is under 5. `trans_count_ratio_y` (metric that measures how spread out the transactions are throughout the year) for most customers is 1, which indicates that a typical customer only purchases once a year. Vast majority of customers have less than 5 transactions during the year. Most customers have one card and IP for the year. Most customers purchase non-shippable products during the year, indicated by `nonShippable_ratio_y` value of 1. 
+
+<br/>
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE, echo=FALSE}
+plot_histogram(trans0[c(2:13)])
+plot_histogram(trans0[c(14:33)])
+```
+
+Below shows distribution of binary variables (encoded categorical variables) when `class` is 0. 
+
+Most transactions originate from `source_E` by volume. Most transactions are not shippable. Summer and Fall appear to have more transaction volume than Winter and Spring.  
+
+```{r}
+names(transactions)
+```
+
+
+```{r fig.height=5, fig.width=7, echo=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+barplot(prop.table(table(trans0[c("class","source_H")])), main="source_H (class = 0)")
+barplot(prop.table(table(trans0[c("class","source_E")])), main="source_E (class = 0)")
+barplot(prop.table(table(trans0[c("class","shippable")])), main="shippable (class = 0)")
+barplot(prop.table(table(trans0[c("class","bill_loc_T")])), main="bill_loc_T (class = 0)")
+barplot(prop.table(table(trans0[c("class","bill_loc_U")])), main="bill_loc_U (class = 0)")
+barplot(prop.table(table(trans0[c("class","isWeekDay")])), main="isWeekDay (class = 0)")
+barplot(prop.table(table(trans0[c("class","spring")])), main="spring (class = 0)")
+barplot(prop.table(table(trans0[c("class","summer")])), main="summer (class = 0)")
+barplot(prop.table(table(trans0[c("class","fall")])), main="fall (class = 0)")
+barplot(prop.table(table(trans0[c("class","winter")])), main="winter (class = 0)")
+barplot(prop.table(table(trans0[c("class","bhours")])), main="bhours (class = 0)")
+par(mfrow = c(1, 1))
+```
+
+---
+
+</br>
+
+### Distribution of Variables When `class` is 1 (anomalous transactions)
+
+<br/>
+
+Below shows the distribution of the numerical variables when `class` is 1, which indicates that the transaction was documented as anomalous. 
+
+In contract to normal profiles, the number of transactions associated with customers who have more than one transactions during the day is high (`trans_count_d`), with some as high as more than 30 transactions per day. The distribution of `trans_count_ratio_y` indicates that anomalous profiles have more than one transaction during the year, with some profiles having more than 200 transactions (`trans_count_y`) during the year. The average yearly transaction amount is on the low-side (`avg_trans_amount_y`). The number of different cards used during the year can go up to 200 different cards (`cust_card_count_y`). The number of different IP is on the higher end as well, with some up to more than 90 different IP used during the year. Majority of anomalous transactions are non-shippable. 
+
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE, echo=FALSE}
+plot_histogram(trans1[c(2:13)])
+plot_histogram(trans1[c(14:33)])
+
+```
+Below shows the distribution of binary variables (endcoded categorical variables) when `class` is 1. 
+
+```{r fig.height=5, fig.width=7, echo=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+barplot(prop.table(table(trans1[c("class","source_H")])), main="source_H (class = 0)")
+barplot(prop.table(table(trans1[c("class","source_E")])), main="source_E (class = 0)")
+barplot(prop.table(table(trans1[c("class","shippable")])), main="shippable (class = 0)")
+barplot(prop.table(table(trans1[c("class","bill_loc_T")])), main="bill_loc_T (class = 0)")
+barplot(prop.table(table(trans1[c("class","bill_loc_U")])), main="bill_loc_U (class = 0)")
+barplot(prop.table(table(trans1[c("class","isWeekDay")])), main="isWeekDay (class = 0)")
+barplot(prop.table(table(trans1[c("class","spring")])), main="spring (class = 0)")
+barplot(prop.table(table(trans1[c("class","summer")])), main="summer (class = 0)")
+barplot(prop.table(table(trans1[c("class","fall")])), main="fall (class = 0)")
+barplot(prop.table(table(trans1[c("class","winter")])), main="winter (class = 0)")
+barplot(prop.table(table(trans1[c("class","bhours")])), main="bhours (class = 0)")
+par(mfrow = c(1, 1))
+```
+
+<br/>
+
+---
+
+### Correlation 
+
+Below is a heat map of correlations between variables. We can note some significant correlations with some variables. `class` has the strongest positive correlation with `trans_count_y`, and followed by positive corrections with `cust_card_count_y` and `cust_ip_count_y`. There is a negative correlation with `trans_count_ratio_y`. We see a strong negative correlation between `shippable` and `nonShippable_ratio_y`, which is not surprising. We see a significant positive correlation between `trans_count_y` and `cust_card_count_y, which is also not surprising. `source_H` has strong negative correlation with `source_E`. 
+And `source_E` has a significant negative correlation with `bill_loc_U`. And lastly, `trans_amount` has a strong positive correlation with `avg_trans_amount_y`, which is (again) not surprising. The findings indicate that concerns about multicollinearity should be considered and avoid using pairs that have significant correlations with each other. 
+
+
+```{r fig.height=12, fig.width=12, message=FALSE, warning=FALSE, echo=FALSE}
+corr_data =cor(transactions_scaled[c(2:33)], use="pairwise.complete.obs", method = "pearson")
+corrplot(corr_data, method = "color",type = "upper", order = "original", number.cex = .7, addCoef.col = "black",   #Add coefficient of correlation
+                            tl.srt = 90,# Text label color and rotation
+                            diag = TRUE)# hide correlation coefficient on the principal diagonal
+```
+
+---
+
+### Identify Multicollinearity
+
+
+To investigate multicollinearity, the function `vifcor` of the `usdm` package is utilized, which calculates the variance inflation factor (VIF). This function excludes highly correlated variables from the data set through a stepwise process. 
+
+These variables were found to have collinearity problem: 
+
+
+```{r}
+vif_result <- vifcor(na.omit(transactions_scaled[c(2:33)]))
+vif_result
+
+#names(transactions)
+```
+Test below shows that dropping these variable resolves the collinearity problem. 
+
+Removing the following variables seem to reolve the collinearity problem in the dataset. 
+
+```{r}
+temp <- transactions_scaled[c(2:33)]
+
+temp$trans_count_y <- NULL
+temp$diff_mean_time_delta_d <- NULL
+temp$avg_trans_amount_y <- NULL
+temp$trans_amount <- NULL
+temp$trans_total_d <- NULL
+temp$trans_total_ratio_y <- NULL
+temp$cust_card_count_y <- NULL
+
+vifcor(na.omit(temp))
+```
+
+<br/> 
+
+---
+
+### Box Plots
+
+The scaled box plots of variables below show that there are outliers throughout the data set. One of the reasons for the outliers is the anomalous activities that were noted. In addition, outliers could also indicate behaviors that occur from time to time that don't fit typical activities such as system disruptions and malfunction, testing, and behaviors of atypical but legitimate customer activities.
+
+Because the volume of transactions in the data set is over 300,000 rows, the box plot is unable to present a clear visualization of the none-outlier regions. 
+
+
+```{r fig.height=10, fig.width=10, message=FALSE, warning=FALSE, echo=FALSE}
+x <- data.frame(scale(na.omit(transactions[c(2:33)])))
+ggplot(stack(x), aes(x= ind, y = values)) + 
+  geom_boxplot(outlier.colour="blue", outlier.shape=3, outlier.size=1, aes(fill=ind)) + theme_minimal() + coord_flip() 
+```
+
+Below is a scaled box plots of the variables when `class` is 1 (anomalous). Because the volume of of transactions that call under this class is much lower (under 2000 rows), it's easier to visualize the none-outlier regions. It's interesting to note that anomalous transactions and profiles exhibit consistent patterns. For example, `cust_card_count_y` do not appear to have any outliers and so as `nonShippable_ratio_y`, `trans_total_y`, and `trans_count_y`. 
+
+
+```{r fig.height=10, fig.width=10, message=FALSE, warning=FALSE, echo=FALSE}
+x <- data.frame(scale(na.omit(trans_s1[c(2:33)])))
+ggplot(stack(x), aes(x= ind, y = values)) + 
+  geom_boxplot(outlier.colour="blue", outlier.shape=3, outlier.size=1, aes(fill=ind)) + theme_minimal() + coord_flip() 
+```
+
+<br/> 
+
+---
+
+### Missing Data 
+
+The plot for missing data below shows that the data set used in this layer of data exploration has no missing data. The missing data problem was explored and imputed in the previous step.
+
+```{r fig.height=9, fig.width=9, message=FALSE, warning=FALSE, echo=FALSE}
+plot_missing(transactions)
+```
+
+<br/> 
+
+---
+
+###  Near-Zero Variance
+
+The function `nearZeroVar` of the `caret` package checks for variables that have near zero-variance. These are variables that do not vary much across observations and as a result, do not add much predictive information. The scaled (normalized) data set is used to check for near zero-variance. 
+
+`freqRatio` is the ratio of frequencies for the most common value over the second most common value. `percentUnique` is the percentage of unique data points out of the total number of data points. `zeroVar` shows `true` if the predictor only has one distinct value; otherwise, `false`. `nzv` shows `true` if the predictor is a near zero variance predictor. The table below is sorted by `nzv`, and as you can see, only `trans_total_ratio_y` has a near zero variance of true. 
+
+
+```{r}
+result <- nearZeroVar(transactions_scaled[c(2:33)], saveMetrics= TRUE)
+datatable(result[order(-result$nzv),])
+```
+
+<br/> 
+
+---
+
+### Feature Selection 
+
+Based on the data exploration findings, we learned that there are variables that are strongly corrected with each other, variables with near zero-variance, and predictors with outliers. This section will make changes to the data set to address each of these. As a reminder, the data set used in this layer of data exploration has no missing value. Missing values were addressed in the previous step.
+
+
+```{r echo=FALSE}
+transactions_f <- transactions
+transactions_scaled_f <- transactions_scaled
+```
+
+<br/>
+
+#### Near Zero-Variance
+
+During data exploration, it was determined that variables `trans_total_ratio_y` is near zero variance. Dropping this variable. 
+
+```{r}
+#drop for non-scaled data set
+transactions_f$trans_total_ratio_y <- NULL
+
+#drop for scaled data set
+transactions_scaled_f$trans_total_ratio_y <- NULL
+```
+
+<br/>
+
+#### Multicollinearity 
+
+During data exploration, the `vifcor` function identified four predictors that have collinearity problems. These variables are dropped. 
+
+```{r}
+#drop for non-scaled data set
+#transactions_f$time_delta <- NULL
+transactions_f$trans_count_y <- NULL
+transactions_f$diff_mean_time_delta_d <- NULL
+transactions_f$avg_trans_amount_y <- NULL
+transactions_f$trans_amount <- NULL
+transactions_f$trans_total_d <- NULL
+transactions_f$trans_total_ratio_y <- NULL
+transactions_f$cust_card_count_y <- NULL
+
+
+#drop for scaled data 
+#transactions_scaled_f$time_delta <- NULL
+transactions_scaled_f$trans_count_y <- NULL
+transactions_scaled_f$diff_mean_time_delta_d <- NULL
+transactions_scaled_f$avg_trans_amount_y <- NULL
+transactions_scaled_f$trans_amount <- NULL
+transactions_scaled_f$trans_total_d <- NULL
+transactions_scaled_f$trans_total_ratio_y <- NULL
+transactions_scaled_f$cust_card_count_y <- NULL
+
+
+```
+
+<br/>
+
+#### Outliers 
+
+Observations with outliers are not dropped as these outliers are significant in determining atypical patterns. 
+
+
+<br/> 
+
+---
+
+
+### The Final Data Set 
+
+After dropping the variables, the data set has 28 variables remaining from 33. 
+
+```{r}
+skim(transactions_f)
+```
+
+Save final data set to file. This file will be used for training and testing the models. 
+
+```{r}
+write.csv(transactions_f, "Data/transactions_final.csv")
+write.csv(transactions_scaled_f, "Data/transactions_scaled_final.csv")
+```
+
+
+---
+
+

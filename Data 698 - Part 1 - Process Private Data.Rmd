@@ -1,0 +1,291 @@
+---
+title: 'Data 698 - Part 1: Process Private Data'
+output:
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+  html_document:
+    df_print: paged
+    theme: cerulean
+    code_folding: hide
+---
+
+### Prepare Proprietary Data
+
+The objective of this process file is to prepare private data and anonymize the data set. Permission was given to use anonymized data set for this research. 
+
+<br/> 
+
+#### Load libraries 
+
+```{r message=FALSE, warning=FALSE}
+library(plyr) #for loading multiple files
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(tidyr) #replace_na
+library(digest) #use for anonymization
+library(knitr) #table print
+library(data.table) #table print
+```
+
+<br/> 
+
+```{r}
+#Function to identify rows without any card number reference 
+no_card_ref <- function(ref1, ref2)
+{
+  return (is.na(ref1) & is.na(ref2))
+}
+#Function to anonymize: source - https://www.r-bloggers.com/2014/11/data-anonymization-in-r/
+anonymize <- function(x, algo="crc32"){
+  unq_hashes <- vapply(unique(x), function(object) digest(object, algo=algo), FUN.VALUE="", USE.NAMES=TRUE)
+  unname(unq_hashes[x])
+}
+```
+
+<br/> 
+
+#### Load Proprietary Data 
+
+Proprietary data is not available for download, but the anonymized data set is publish in the repository.  
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+getwd()
+```
+
+```{r}
+#read transaction data
+transactions <- read.csv("Data/transactions.csv", na.strings=c("NA","NaN", " ", "\\N"))
+#Assign column names 
+names(transactions) <-  c('trans_source', 'sys_source', 'payment_type', 'trans_id', 
+                   'trans_datetime', 'trans_amount', 'cust_ip', 'bill_loc', 
+                   'shippable', 'cust_id', 'cust_source', 'cust_reg_datetime', 
+                   'payment_ref', 'profile_id')
+#read payment profiles data  
+payment_profiles <- read.csv("Data/payment_profiles.csv")
+#assign column names 
+names(payment_profiles) <- c("profile_id", "card_ref")
+
+#read anomalous contacts
+anomalous_contacts <- read.csv("Data/anomalous_contacts.csv")
+#anomalous transactions
+anomalous_trans <- read.csv("Data/anomalous_transactions.csv")
+#cust_category mapping'
+cust_category_mapping <- read.csv("Data/cust_category_mapping.csv")
+#contact mapping
+contact_mapping <- read.csv("Data/contact_mapping.csv")
+```
+
+<br/> 
+
+#### Incorporate Archived and Recent Files from Credit Card Gateway Provider 
+
+Load credit card data for mapping credit card references. All files are in the "A.net" folder. Partial credit card data from gateway provider goes back to 2017. These are downloads that client happens to have available. Client can only download data from credit card gateway provider for the past two year. This data is used to augment credit card references that's already stored in client database.  
+
+```{r}
+mydir = "Data/A.net"
+myfiles = list.files(path=mydir, pattern="*.csv", full.names=TRUE)
+a.net = ldply(myfiles, read.table, sep = ",", header = TRUE)
+#duplicates are possible: remove duplicates. 
+a.net %>% distinct() -> a.net 
+#clean up
+mydir <-NULL
+myfiles <-NULL
+```
+
+
+Join the card references stored in client database. Pre-joining this data with the `transactions` pull was problematic. Query against client database to join with the payment profiles table was too slow and connection to server timed out several times. 
+
+```{r}
+left_join(transactions, payment_profiles, by="profile_id") -> transactions
+#payment_profiles <- NULL 
+```
+
+Before incorporating data from gateway, there are 219,417 records out of 304,259 (72% missing)
+
+```{r}
+transactions %>% mutate(is_blank = ifelse(is.na(card_ref)==TRUE,1,0)) %>% group_by(is_blank) %>% summarize(n=n())
+```
+
+```{r}
+219417/nrow(transactions)
+```
+
+
+Join credit card gateway data with `transactions` table. This is a best effort to augment credit card reference info (last four digits) with what's already stored in client database (which in incomplete). Some of client's endpoints do not store credit card reference of transaction. In addition, client database may not record payment ID (reference to credit card gateway record), which makes mapping to credit card gateway data not possible. 
+
+```{r warning=FALSE}
+#NOTE: message "NAs introduced by coercion" comes up because some of the payment_ref are blanks 
+#change column name of "Transaction.ID" to payment_ref for the join 
+names(a.net)[1] <- "payment_ref"
+#need to make transactions payment_ref and A.net Transaction.ID the same data type so they can join 
+transactions$payment_ref <- as.numeric(transactions$payment_ref)
+a.net$payment_ref <- as.numeric(a.net$payment_ref)
+#join credit card gateway data 
+transactions <- left_join(transactions, a.net, by = "payment_ref")
+#clean up 
+a.net <-NULL
+```
+
+
+Convert transaction date/time and contact registration date/time to date/time format.
+
+```{r}
+#transaction datetime
+transactions$trans_datetime <- as.POSIXct(transactions$trans_datetime,tz="UTC")
+#registration datetime
+transactions$cust_reg_datetime <- as.POSIXct(transactions$cust_reg_datetime,tz="UTC")
+```
+
+Assign row ID numbers for each row. This will help identify each row uniquely. Data publicly available will not have any system-generated IDs. The row ID is also used in some of the grouping operations below.   
+
+```{r}
+transactions %>% mutate(row_id = row_number()) -> transactions
+```
+
+Merge credit card references available in either client's database or gateway provider download files. These are tracked separately in two columns: `payment_ref` and `Card.Number`. The column `no_card_ref` will be assigned `TRUE` when both these columns do not have values for a given row. The process below combines both columns into one and then joins this combined column with the `transactions` data frame. 
+
+```{r}
+#easily filter for rows with no card references 
+transactions$no_card_ref <- NA
+transactions$no_card_ref <- no_card_ref(transactions$card_ref, transactions$Card.Number)
+#transactions$no_card_ref <- is.na(transactions$card_ref) | is.na(transactions$Card.Number)
+#transactions %>% filter(no_card_ref == TRUE) #A value of "True" indicates that there is no available credit card number 
+
+#retrieve card references from client database
+transactions %>% filter(is.na(card_ref)==FALSE) %>% dplyr::select(row_id, card_ref) -> card_ref1
+#retrieve card references from gateway provider 
+transactions %>% filter(is.na(Card.Number)==FALSE) %>% dplyr::select(row_id, Card.Number) -> card_ref2
+
+#update column name so we can union
+names(card_ref2)[2]<- "card_info"
+names(card_ref1)[2]<- "card_info"
+
+#union both sources of card references
+card_ref_all <- dplyr::union(card_ref1, card_ref2)
+```
+
+Result of 0 rows indicate we do not have any row IDs mapped to more than one card reference. 
+
+```{r}
+#ensure We do not have any row_id's mapped to more than one card reference 
+card_ref_all %>% dplyr::group_by(row_id) %>% summarize(n=n()) -> result
+filter(result, n>1)
+```
+
+Finally join the column that has both card references. 
+
+```{r}
+left_join(transactions, card_ref_all, by="row_id") -> transactions
+
+#clean up 
+card_ref1 <- NULL
+card_ref2 <- NULL
+card_ref_all <- NULL
+result <- NULL
+
+#remove columns no longer needed
+transactions$payment_type <- NULL
+transactions$profile_id <- NULL
+transactions$payment_ref <- NULL
+transactions$Card.Number <- NULL
+transactions$no_card_ref <- NULL
+transactions$card_ref <- NULL
+```
+
+<br/> 
+
+#### Map `cust_source` to `cust_category`
+
+This mapping reduced the cardinality of `cust_source` to three types of categorical values. 
+
+```{r}
+left_join(transactions, cust_category_mapping, by = c("cust_source" = "cust_source")) -> transactions
+```
+
+<br/> 
+
+#### Tag Anomalous Transactions 
+
+Mark transactions associated with anomalous profiles. This list is based on periodic reports and manual documentation of analyst. 
+
+```{r}
+#join with list of anomalous contacts 
+left_join(transactions, anomalous_contacts, by="cust_id") -> transactions
+#replace class NA as zero
+transactions$class %>% replace_na(0) -> transactions$class
+
+transactions$trans_id <- as.integer(transactions$trans_id)
+anomalous_trans$trans_id <- as.integer(anomalous_trans$trans_id)
+
+#attach transactions flagged as anomalous to transactions data frame and get only the resulting column class2
+left_join(transactions, anomalous_trans, by="trans_id") -> transactions
+#use "or" operation to combine "0 or 1" values in class and class2 (if at least one column has value of 1, the result should be 1)
+transactions$class2 %>% replace_na(0) -> transactions$class2
+transactions %>% mutate(class = ifelse(class2==1, class2, class)) -> transactions                            
+#remove class2
+transactions$class2 <- NULL
+```
+
+Review transactions flagged as class = 1 (indicates something anomalous with the transactions).
+
+```{r}
+filter(transactions[c(1:2,4:7,9:15)], class==1)
+```
+
+
+Before masking sensitive data, let's review what we have so far. 
+
+```{r}
+skim(transactions)
+```
+
+<br/> 
+
+#### Anonymize Proprietary Data 
+
+These columns are anonymized.  
+
+- cust_ip
+- cust_id
+- trans_id
+- card_info 
+
+```{r}
+#save nonmasked version 
+original <- transactions
+#mask these columns 
+transactions$trans_id <- anonymize(as.character(transactions$trans_id))
+transactions$cust_ip <- anonymize(transactions$cust_ip)
+transactions$card_info <- anonymize(transactions$card_info)
+#map contact ID to numeric
+inner_join(transactions, contact_mapping, by=c("cust_id"="cust_id")) -> transactions
+transactions$cust_id <- transactions$contact_id
+transactions$contact_id <- NULL
+```
+
+Preview anonymized version. 
+
+```{r}
+datatable(head(transactions,20))
+```
+
+<br/> 
+
+#### Save Anonymized Data 
+
+
+Write the final anonymized version and the original version. 
+
+```{r}
+#save the original
+#write.csv(original, "Data/preprocessed_transactions_unmasked.csv")
+#save the masked version 
+write.csv(transactions, "Data/preprocessed_transactions_anonymized.csv")
+```
+
+
+
+

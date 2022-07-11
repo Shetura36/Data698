@@ -1,0 +1,796 @@
+---
+title: "Data 698 - Part 2: Data Exploration, Metrics, and Imputation"
+date: "June 2022"
+output:
+  html_document:
+    df_print: paged
+    theme: cerulean
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(plyr) #for loading multiple files
+library(dplyr)
+library(lubridate)
+library(skimr)
+library(tidyr) #replace_na
+library(DataExplorer)
+library(psych)
+library(ggplot2)
+library(mice)
+library(DT)
+library(knitr)
+```
+
+### About the Data Set 
+
+For security reasons, the source of this data set is undisclosed. Permission was obtained under the condition that the published data set is anonymized. This data set contains 304,259 observations and 15 variables.
+
+The system that generated these transactions does not track customer IP and card information across all areas. A best effort was done to incorporate credit card information from archived file downloads from the credit card gateway provider. Archived file downloads of older transactions were augmented by current data downloads from the gateway provider for transactions going back to two years ago. This effort helped reduce the number of missing card data.
+
+Reports of anomalous transactions were documented, and part of the pre-processing task was to mark all the anomalous transactions as per the documentation. These anomalous transactions were manually tracked. The undisclosed organization is a small organization and does not have an automated system that flags anomalous activities. Manual tracking and investigation is done by a specialist. The manual detection is not comprehensive and is often based on reported cases.
+
+
+Description of variables:
+
+- class: value of 1 identifies the transaction as anomalous; otherwise, 0.      
+- trans_source: code that identifies the source of the transaction.
+- sys_source: code that identifies the system source of transaction. 
+- trans_id: transaction identifier. 
+- trans_datetime: date/time when the transaction was created. 
+- trans_amount: transaction amount. 
+- bill_loc: general location code of the transaction billing. 
+- shippable: a value of 1 indicates this transaction has a shippable item; otherwise, 0. 
+- card_info: reference to this transaction's card number. 
+- cust_id: customer identifier.  
+- cust_ip: reference to customer's IP at the time of purchase. 
+- cust_source: identifies the application that created the customer account.
+- cust_category: code that categorizes customers into three broad group.
+- cust_reg_datetime: date/time when the customer account was created.
+- row_id: row identifier.
+
+---
+
+### Load the Data
+
+Data was pulled from the undisclosed system and pre-processed privately. The final output of this internal processing is the anonymized data set that's being read below.  
+
+```{r}
+#set path to the active directory 
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+#read transaction data
+transactions <- read.csv("Data/preprocessed_transactions_anonymized.csv", na.strings=c("NA","NaN", " ", "\\N"), stringsAsFactors = TRUE)
+#transactions <- read.csv("Data/preprocessed_transactions_unmasked.csv", na.strings=c("NA","NaN", " ", "\\N"), stringsAsFactors = TRUE)
+#remove first column (no data)
+transactions$X <- NULL 
+```
+
+Convert transaction date/time and contact registration date/time to date/time format.
+
+```{r}
+#transaction datetime
+transactions$trans_datetime <- as.POSIXct(transactions$trans_datetime,tz="UTC")
+#registration datetime
+transactions$cust_reg_datetime <- as.POSIXct(transactions$cust_reg_datetime,tz="UTC")
+#class to factor
+transactions$class <- as.factor(transactions$class)
+
+```
+
+---
+
+### Summary of Data
+
+There are 304,286 transaction rows and 15 variables, of which 8 are factors, 5 are numeric, and 2 are POSIXct. 
+
+As you can see, there are only two variables with missing data, `card_info` and `cust_ip`. These variables, respectively, refer to the card and IP information associated with the transaction. The bar plot below shows 29.82% (90,715 rows) of transactions have missing card values and 45.83% (139,435 rows) missing IP values. As mentioned previously, these disparate applications do not log card and IP data  across all areas where transactions can be generated. To reduce the number of missing card values, archived and current downloads from the credit card gateway provider was incorporated into the data set when possible. However, there are limitations to this as the gateway provider only allows downloads within the past two years, and the archived downloads are incomplete. 
+
+
+```{r}
+skim(transactions)
+```
+
+The plot below shows that two variables have missing data, namely `card_info` and `cust_ip`. The rest of the 13 variables do not having any missing data. The variable `cust_ip` has a missingness of 45.83%  and `cust_card` has a missingness of 29.81%.
+
+Missing values for these two variables will go through an imputation process. To better understand this, the next few sections below explores these two  variables more.
+
+```{r echo=FALSE}
+plot_missing(transactions)
+```
+
+<br/>
+
+#### A Closer Look at the Distribution of Customer Card Information with Nonmissing Values
+
+Below is a review of the descriptive statistics of transactions with card information. The transactions are grouped by year and customer before calculating the number of distinct card references. 
+
+```{r}
+#for transactions with no missing card reference, calculate the number of card associated with the yearly customer profile.
+transactions %>% mutate(card_info_missing = ifelse(is.na(card_info)==TRUE, 1,0)) %>% 
+  filter(card_info_missing==0) %>% 
+    group_by(year(trans_datetime), cust_id) %>% 
+      summarise(cust_card_count_y = n_distinct(card_info), .groups="drop") %>% 
+      ungroup() -> cust_card_count_y
+#rename first column 
+names(cust_card_count_y)[1] <- "trans_year"
+```
+
+As you can see, there are 184,791 yearly customer profiles with card information. The yearly average number of distinct cards associated with a customer profile is 1.03, a median of 1 and the count goes from a minimum of 1 to a maximum of 255 different cards. The maximum count of 255 different cards is an unusually high-count and is highly indicative of an anomalous customer profile. 
+
+```{r echo=FALSE, warning=FALSE}
+describeBy(cust_card_count_y$cust_card_count_y)
+```
+
+<b/> 
+
+The box plot below shows the distribution of the yearly number of distinct card references associated with a customer profile. The plots show an unusually high number of credit card numbers being used by a few customers during the years 2017 and 2018.
+
+```{r echo=FALSE}
+par(mfrow = c(1, 2))
+plot(cust_card_count_y[c(1,3)], main="Yearly Customer Profile", xlab="YEAR", ylab="No. of Different Cards")
+boxplot(cust_card_count_y$cust_card_count_y, main="Yearly Customer Profile", ylab="No. of Different Cards")
+par(mfrow = c(1, 1))
+```
+
+
+<br/> 
+
+#### A Closer Look at the Distribtuion of Customer IP Information with Nonmissing Values 
+
+Below is a review of the descriptive statistics of transactions with customer IP confirmation. The transactions are grouped by year and by customer before calculating the the number of distinct IP information. 
+
+
+```{r}
+#calculate the number of distinct IP associated with customer for the transaction year. 
+transactions %>% mutate(cust_ip_missing = ifelse(is.na(cust_ip)==TRUE, 1,0)) %>% 
+  filter(cust_ip_missing==0) %>% 
+    group_by(year(trans_datetime), cust_id) %>% 
+    summarise(cust_ip_count_y = n_distinct(cust_ip), .groups="drop") %>%
+    ungroup() -> cust_ip_count_y
+#rename first column 
+names(cust_ip_count_y)[1] <- "trans_year"
+```
+
+As you can see, the yearly average number of different IP addresses associated with a customer profile is 1.1, and a median of 1. The min count is 1 and a max of 111. 
+
+```{r}
+describeBy(cust_ip_count_y$cust_ip_count_y)
+```
+
+<br/> 
+
+The box plot below shows the distribution of the yearly number of distinct IP addresses associated with a customer. The plots show an unusually high count in 2018 of 111 different IP addresses associated with a single customer profile. This is highly indicative of an anomalous profile. It appears that the system started tracking customer IP addresses in 2018. But as mentioned previously, the system does not log this information across all areas where transactions can be generated. 
+
+
+```{r echo=FALSE}
+par(mfrow = c(1, 2))
+plot(cust_ip_count_y[c(1,3)], main="Yearly Customer Profile", xlab="YEAR", ylab="No. of Different IPs")
+boxplot(cust_ip_count_y$cust_ip_count_y, main="Yearly Customer Profile", ylab="No. of Different IPs")
+par(mfrow = c(1, 1))
+```
+
+<br/> 
+
+The code below adds the variables `cust_card_count_y` and `cust_ip_count_y` to the data frame. These variables represent the yearly number of distinct cards and IP information associated with a customer respectively. As noted previously, these two variables have missing values. These missing values are ignored in the count of distinct values. A count of zero indicates that the customer profile does not have any non-missing card or IP values associated with their transactions for the given year.   
+
+```{r}
+#add column to track year
+transactions$trans_year <- year(transactions$trans_datetime)
+  
+#calculate the number of distinct cards for each year for each each customer. NA values are ignored. 
+transactions %>% group_by(trans_year, cust_id) %>% 
+  mutate(cust_card_count_y = n_distinct(card_info, na.rm = TRUE)) %>% ungroup() -> transactions 
+
+#calculate the number of distinct IP for each year for each customer. NA values are ignored. 
+transactions %>% group_by(trans_year, cust_id) %>% 
+  mutate(cust_ip_count_y = n_distinct(cust_ip, na.rm = TRUE)) %>% ungroup() -> transactions
+```
+
+The code below counts the number of customer profiles for each year that have missing and present card and IP values. 
+
+```{r}
+#customer cards
+transactions %>% distinct(trans_year, cust_id, cust_card_count_y) %>% 
+  mutate(is_card_blank = ifelse(cust_card_count_y==0, "yes", "no")) %>%
+  group_by(trans_year, is_card_blank) %>% summarise(n=n(), .groups="drop") %>% ungroup() -> is_card_blank_y
+#customer IPs 
+transactions %>% distinct(trans_year, cust_id, cust_ip_count_y) %>% 
+  mutate(is_ip_blank = ifelse(cust_ip_count_y==0, "yes", "no")) %>%
+  group_by(trans_year, is_ip_blank) %>% summarise(n=n(), .groups="drop") %>% ungroup() -> is_ip_blank_y
+```
+
+The bar plot shows that a significant portion of the transactions recorded before 2018 did not capture customer card information.
+
+```{r echo=FALSE}
+ggplot(is_card_blank_y,                                      
+       aes(x = trans_year, y = n, fill = is_card_blank)) + 
+          geom_bar(stat = "identity") + ggtitle("Customer Profiles: Missing Card Numbers")
+```
+
+<br/> 
+
+There are 81,584 yearly customer profiles with no card information out of 266,375 profiles. 
+
+```{r}
+is_card_blank_y %>% group_by(is_card_blank) %>% summarise(total=sum(n))
+```
+
+The bar plot shows that before 2018, customer IP information was not logged with the transactions. 
+
+```{r echo=FALSE}
+ggplot(is_ip_blank_y,                                      
+       aes(x = trans_year, y = n, fill = is_ip_blank)) + 
+          geom_bar(stat = "identity") + ggtitle("Customer Profiles: Missing IP Address")
+```
+<br/>
+
+There are 123,574 yearly customer profiles with no IP information out of 266,375 profiles. 
+
+```{r}
+is_ip_blank_y %>% group_by(is_ip_blank) %>% summarise(total=sum(n))
+```
+
+---
+
+### Missing Customer Card and IP Information
+
+Card and IP information are categorical data with high cardinality. The data that would be of interest when building the models is the distinct count of these categorical values relative to a customer profile.  As mentioned previously, a count of zero indicates that the customer profile does not have non-missing card or IP value logged with any of their transactions for the given year. To impute these missing values, a count of zero is replaced by `NA`. 
+
+With this approach, if a customer has *both* missing and present values, the *dplyr* function `n_distinct`with the argument `na.rm=TRUE`set will result in a value that equals the number of distinct non-missing card or IP values. As a result, any missing values associated with the yearly customer profile will be excluded from the imputation process. The data exploratory process below shows that there are 7,430 yearly customer profiles with *both* missing and present card values. In addition, there are 93 yearly customer profiles with *both* missing and present IP values. There are 266,375 yearly customer profiles in the data set. 
+
+The imputation process will apply to the 81,584 and 123,573 yearly customer profiles with missing card and IP information, respectively. This imputation process will be applied after performing the data transformation of the other variables in the data set. 
+
+<br/> 
+
+#### Cucstomers with *Both* Missing and Present Card Values 
+
+The code below identifies yearly customer profiles with *both* missing and present values. 
+
+```{r}
+#select blank cards only 
+transactions %>% filter(is.na(card_info)==TRUE) %>% 
+  dplyr::select(trans_year, cust_id) %>% distinct() -> card_info_blank
+#select none-blank cards 
+transactions %>% filter(is.na(card_info)==FALSE) %>% 
+  dplyr::select(trans_year, cust_id, cust_card_count_y) %>% distinct() -> card_info_notBlank 
+
+#join none-blank and blank cards for given year and customer
+#this identifies the customers with none-blank cards but also with blank cards 
+inner_join(card_info_notBlank, card_info_blank, by=c("trans_year"="trans_year", "cust_id" = "cust_id")) -> cust_with_both_y
+
+## show distribution of number of distinct card references for customers that also have blank card references during the year 
+cust_with_both_y %>% group_by(trans_year, cust_card_count_y) %>% summarise(n=n(), .groups="drop") -> cust_summary_y
+
+#clean up
+card_info_blank <- NULL
+card_info_notBlank <- NULL
+cust_with_both_y <- NULL
+```
+
+Below is the distribution of the number of customers for each year with *both* missing and non-missing card information in the data set. The bar plot below shows that vast majority of the 7,430 yearly customer profiles that fall within this category have one distinct card.
+
+```{r}
+sum(cust_summary_y$n)
+```
+
+```{r echo=FALSE}
+ggplot(cust_summary_y,                                      
+       aes(x = trans_year, y = n, fill = cust_card_count_y)) + 
+          geom_bar(stat = "identity", position = "dodge") + ggtitle("Customer Profiles with Both Blank and Nonblank Card Information")
+```
+
+<br/> 
+
+#### Customers with *Both* Missing and Present IP Values 
+
+The code below identifies yearly customer profiles with *both* missing and present IP values. 
+
+```{r}
+#select blank ip only 
+transactions %>% filter(is.na(cust_ip)==TRUE) %>% 
+  dplyr::select(trans_year, cust_id) %>% distinct() -> ip_blank
+#select none-blank ip 
+transactions %>% filter(is.na(cust_ip)==FALSE) %>% 
+  dplyr::select(trans_year, cust_id, cust_ip_count_y) %>% distinct() -> ip_notBlank 
+
+#join none-blank and blank ip for given year and customer
+#this identifies the customers with both missing and present IP values 
+inner_join(ip_notBlank, ip_blank, by=c("trans_year"="trans_year", "cust_id" = "cust_id")) -> cust_with_both2_y
+
+## show distribution of number of distinct nonblank ip for customers that also have blank ip for the year 
+cust_with_both2_y %>% group_by(trans_year, cust_ip_count_y) %>% summarise(n=n(), .groups="drop") -> cust_summary2_y
+
+#clean up 
+ip_blank <- NULL
+ip_notBlank <- NULL
+cust_with_both2_y <- NULL
+```
+
+Below is the distribution of the number of yearly customers profiles with *both* missing and present IP values in the data set. There are 93 profiles that fall under this category, all occurring in 2018. 
+
+```{r}
+sum(cust_summary2_y$n)
+```
+
+The table below shows that in 2018, there is one profile with 111 different IP values, which is an unusually high number of IP addresses. 
+
+```{r}
+cust_summary2_y
+```
+
+The step below replaces the zero values of yearly distinct number of cards and IP's to `NA` and removes categorical variables `cust_ip` and `card_info` IP from the data frame. 
+
+```{r}
+#replace count of zero to NA
+transactions["cust_card_count_y"][transactions["cust_card_count_y"]==0] <- NA
+transactions["cust_ip_count_y"][transactions["cust_ip_count_y"]==0] <- NA
+
+#remove cust_ip and card_info variables from transactions: no longer needed 
+transactions$cust_ip <- NULL
+transactions$card_info <- NULL
+```
+
+The function below is used to calculate the seconds elapsed since midnight. 
+
+```{r}
+get_elapsed_secs <- function(datetime_val){
+  hour <- as.numeric(format(as.POSIXct(datetime_val), format = "%H"))
+  min <- as.numeric(format(as.POSIXct(datetime_val), format = "%M"))
+  sec <- as.numeric(format(as.POSIXct(datetime_val), format = "%S"))
+  return(hour * 3600 + min * 60 + sec)
+}
+```
+
+---
+
+### Data Transformation
+
+In the previous section, the categorical variables `cust_ip` and `card_info` were dropped after transforming these variables to numerical variables `cust_ip_count_y` and `cust_card_count_y`respectively. To gain more insights, the process below transforms the other variables to capture useful information. After the data transformation, most of the raw variables from data set are dropped in preference to the variables listed below.  
+
+- class: value of 1 identifies the transaction as anomalous; otherwise, 0. 
+- trans_source: code that identifies the source of the transaction.
+- sys_source: code that identifies the system source of transaction. 
+- trans_amount: transaction amount.
+- bill_loc: general location code of the transaction billing.
+- shippable:  a value of 1 indicates this transaction has a shippable item; otherwise, 0.
+- cust_category: code that categorizes customers into three broad groups.
+- trans_year: the year when the transaction occurred. 
+- trans_dayOfweek: the day of week when the transaction occurred.
+- trans_hour: the hour when the transaction occurred. 
+- trans_minute: the minute when the transaction occurred. 
+- trans_month: the month when the transaction occurred. 
+- trans_day: the day when the transaction occurred. 
+- trans_seconds: the seconds when the transaction occurred. 
+- trans_elapsed_secs_d:the number of seconds elapsed from midnight of the day when the transaction occurred.
+- time_delta: the difference in time (seconds) between consecutive transactions.
+- amount_delta: the difference in amount between consecutive transactions. 
+- avg_trans_amount_y:
+- diff_avg_trans_amount_y: difference from the average transaction amount for a given customer for the given year.
+- trans_count_y:  the number of transactions for a given customer for the given year when the transaction occurred.
+- trans_count_d: the number of transactions for a given customer for the given year when the transaction occurred. 
+- trans_count_ratio_y: the ratio of daily total over yearly total fo the given customer. 
+- shippable_total_y:
+- notShippable_total_y:
+- nonShippable_ratio_y: the ratio of non-shippable total over total amount for the year for the given customer.  
+- account_age: the number of days passed between the date when the account was created and when the transaction occurred. 
+- cust_card_count_y: the number of distinct card references for a given customer for the given year.
+- cust_ip_count_y: the number of distinct IP addresses for a given customer for the given year.
+- mean_time_delta_d: the mean time_delta for the day
+- diff_mean_time_delta_d: the difference between this transaction's time_delta to the mean_time_delta
+- row_id: identifies the transaction row. 
+
+
+```{r echo=FALSE}
+transactions_save <- transactions
+#transactions <- transactions_save
+
+#reset 
+#transactions <- transactions_save
+
+```
+
+```{r}
+#days from 1/1/2015 midnight
+
+#reference date to measure time 
+transactions$ref_datetime <-  as.POSIXct("2015-01-01 00:00:00",  tz="UTC")
+
+#no. of days from reference
+transactions$time_from_refDate <- difftime(transactions$trans_datetime, transactions$ref_datetime, units="days")
+
+#transaction date
+transactions$trans_year <- year(transactions$trans_datetime)
+
+#transaction date
+transactions$trans_date <- as.Date(transactions$trans_datetime)
+
+#day of week
+transactions$trans_dayOfweek <- wday(transactions$trans_datetime)
+
+#transaction month
+transactions$trans_month <- month(transactions$trans_datetime)
+
+#transaction day
+transactions$trans_day <- day(transactions$trans_datetime)
+
+#transaction hour
+transactions$trans_hour <- hour(transactions$trans_datetime)
+
+#transaction minute
+transactions$trans_minute <- minute(transactions$trans_datetime)
+
+#transaction seconds
+transactions$trans_seconds <- second(transactions$trans_datetime)
+
+#seconds elapsed for the day for transactions
+transactions$trans_elapsed_secs_d <- get_elapsed_secs(transactions$trans_datetime)
+
+#registration date
+transactions$cust_reg_date <- as.Date(transactions$cust_reg_datetime)
+
+#days elapsed since registration at time of purchase
+transactions$account_age <- abs(ymd(transactions$trans_date) - ymd(from = transactions$cust_reg_date))
+
+#calculate average transaction amount for given user for the current year
+transactions %>% group_by(trans_year, cust_id) %>% 
+  mutate(avg_trans_amount_y = mean(trans_amount)) %>% ungroup() -> transactions 
+
+#difference from average transaction
+transactions$diff_avg_trans_amount_y <- transactions$avg_trans_amount_y - transactions$trans_amount
+
+#get the number of transactions for the year for a given customer
+transactions %>% group_by(trans_year, cust_id) %>% 
+  mutate(trans_count_y = n())  %>% ungroup() -> transactions
+
+#get the number of transactions for the day for a given customer 
+transactions %>% group_by(trans_date, cust_id) %>% 
+  mutate(trans_count_d = n())  %>% ungroup() -> transactions
+
+#get ratio of number of transactions for the day relative to the count for the year 
+transactions$trans_count_ratio_y <- transactions$trans_count_d/transactions$trans_count_y
+
+#order the transactions by date time and find the overall time difference between transactions without regard to customer
+#some use multiple accounts at the same time
+transactions %>% arrange(trans_datetime) %>%
+  mutate(prev_trans_datetime = lag(trans_datetime)) %>%
+    mutate(prev_trans_amount = lag(trans_amount)) -> transactions
+
+#overall time difference in seconds between consecutive transactions 
+transactions$time_delta <- difftime(transactions$trans_datetime, transactions$prev_trans_datetime, units = "secs")   
+
+#overall amount difference between consecutive transactions 
+transactions$amount_delta <- transactions$trans_amount - transactions$prev_trans_amount
+
+#customer total for the year 
+transactions %>% group_by(trans_year, cust_id) %>%
+   mutate(trans_total_y=sum(trans_amount)) %>% ungroup() -> transactions
+
+#total for transactions with non-shippable items for given customer for given year
+transactions  %>% group_by(trans_year, cust_id) %>% filter(shippable==0) %>%
+  summarise(notShippable_total_y=sum(trans_amount), .groups="drop") %>% ungroup() -> notShippable_total
+
+#add notShippable_total to transactions data frame
+left_join(transactions, notShippable_total, by=c('trans_year'='trans_year', 'cust_id'='cust_id')) -> transactions
+#assign 0 for customer-year with no match for nonShippable total for the year 
+
+#assign value of zero when nonShippable_total_y is 'NA'
+transactions %>% 
+  mutate(notShippable_total_y = ifelse(is.na(notShippable_total_y)==TRUE,0,notShippable_total_y)) -> transactions
+
+#calculate nonShippable ratio 
+transactions$nonShippable_ratio_y <- transactions$notShippable_total_y /  transactions$trans_total_y
+
+#calculate total amount for the day
+transactions %>% group_by(trans_date, cust_id) %>% 
+  mutate(trans_total_d = sum(trans_amount)) -> transactions
+
+#trans amount ratio of day to year 
+transactions$trans_total_ratio_y  <- transactions$trans_total_d / transactions$trans_total_y
+
+#ratio of trans to card squared
+#transactions$trans_card2_ratio_y <- transactions$trans_count_y / transactions$cust_card_count_y^2
+
+#remove
+transactions$ref_datetime <- NULL
+```
+
+Remove transaction row with `NA` value for `time_delta`. The is the earliest transaction in the data frame, and is the transaction that initialized the calculation of `time_delta`. 
+
+```{r}
+#remove the row with time_delta of `NA
+transactions %>% filter(is.na(time_delta)==FALSE) -> transactions
+
+#calculate mean_time_delta_d for the day
+transactions %>% group_by(trans_date) %>% 
+  summarise(mean_time_delta_d = mean(time_delta, na.rm = TRUE), .groups="drop") %>% ungroup() -> mean_time_delta_t
+#join mean_time_delta
+inner_join(data.frame(transactions), data.frame(mean_time_delta_t), 
+           by=c("trans_date"="trans_date")) -> transactions
+#mean_time_delta <- NULL 
+
+#calculate difference between mean_time_delta and current transaction's time_delta
+transactions$diff_mean_time_delta_d = transactions$time_delta - transactions$mean_time_delta_d
+```
+
+Select the variables to keep in the transformed data set.
+
+```{r}
+#names(transactions)
+transactions %>% 
+  dplyr::select("row_id", "cust_id", "class", "trans_source", "sys_source",  "trans_amount", "bill_loc", "shippable", 
+       "cust_category", "trans_year", "trans_date", "trans_dayOfweek", "trans_hour", "trans_minute", 
+       "trans_month", "trans_day", "trans_seconds", "trans_elapsed_secs_d", "time_delta", "amount_delta", 
+       "avg_trans_amount_y", "diff_avg_trans_amount_y", "trans_count_y", "trans_count_d", "trans_count_ratio_y", 
+       "trans_total_y", "trans_total_d", "trans_total_ratio_y", "notShippable_total_y", "nonShippable_ratio_y", "account_age",
+       "cust_card_count_y", "cust_ip_count_y", "mean_time_delta_d", "diff_mean_time_delta_d", "time_from_refDate") -> df_trans
+
+#convert tibble to data frame 
+df_trans <- data.frame(df_trans)
+```
+
+The summary below shows that after the data transformation, there are now 35 variables in data set. There is a new variable with missing values, namely `nonShippable_ratio_y`, in addition to `cust_card_count_y` and `cust_ip_count_y`. Upon closer look, transaction rows with missing values for `nonShippable_ratio_y` have `NAN` values due to division by zero. For these 432 rows, the `trans_amount` are all zeros. After referring back to the source data files, these affected transaction are zero-amount transactions associated with promotional activities and are therefore not actual card transactions. These affected rows are dropped from the data set.
+
+```{r}
+skim(df_trans)
+```
+
+Below is a preview of some of the transaction rows with missing values for `nonShippable_ratio_y`. As you can see, the `trans_amount` are all zeroes.
+
+```{r}
+datatable(df_trans %>% filter(is.na(nonShippable_ratio_y)==TRUE) %>% 
+            dplyr::select("class", "notShippable_total_y", "trans_amount"))
+```
+
+Drop rows with missing values for `nonShippable_ratio_y`.
+
+```{r}
+subset(df_trans, is.na(nonShippable_ratio_y)==FALSE) -> df_trans
+
+#check new size
+nrow(df_trans)
+```
+
+The imputation only considers variables that measure yearly metrics. The data frame `df_trans` includes variables with different time dimensions. 
+
+```{r}
+nrow(df_trans %>% distinct(trans_year, cust_id))
+```
+
+265,991 rows --> distinct (trans_year, cust_id)
+265,991 rows --> yearly metrics included in the imputation 
+
+```{r}
+df_trans %>% distinct(cust_id, trans_year, trans_total_y, avg_trans_amount_y, trans_count_y, nonShippable_ratio_y,
+                      cust_card_count_y, cust_ip_count_y) -> df_trans_impute
+nrow(df_trans_impute)
+```
+
+Check that no customers are repeated in the impute data set. An output of zero indicates that there are no repeated customers. 
+
+```{r}
+nrow(df_trans_impute %>% group_by(cust_id, trans_year) %>% summarise(n=n(), .groups="drop") %>% filter(n>1))
+```
+
+Before imputation, the mean of `cust_card_count_y` is 1.03, and the mean of `cust_ip_count_y`1.10. 
+
+```{r}
+skim(df_trans_impute)
+```
+
+---
+
+### Imputation of Missing Values 
+
+The missing values for the two variables `cust_card_count_y` and `cust_ip_count_y` are imputed using the *Multivariate Imputation by Chained Equations* package or mice. Below is an excerpt that provides some background information about this package. 
+
+> The mice package implements a method to deal with missing data. The package creates multiple imputations (replacement values) for multivariate missing data. The method is based on Fully Conditional Specification, where each incomplete variable is imputed by a separate model. The MICE algorithm can impute mixes of continuous, binary, unordered categorical and ordered categorical data. In addition, MICE can impute continuous two-level data, and maintain consistency between imputations by means of passive imputation. Many diagnostic plots are implemented to inspect the quality of the imputations.
+Apply the imputation function. The returns an S3 object of class `mids` (multiply imputed data set).
+
+The code below performs the imputation of the missing values. The variable `cust_id` is removed from the data frame. 
+
+```{r}
+df_trans_impute_save <- df_trans_impute
+df_trans_impute$cust_id <- NULL
+s3obj_mice_impute = mice(df_trans_impute, print = FALSE, seed = 360)
+```
+
+Below is the density plot of the variables `cust_card_count_y` and `cust_ip_count_y` with imputed data.
+
+```{r}
+densityplot(s3obj_mice_impute)
+```
+
+The `complete` function of the `mice` package exports the imputed data. 
+
+```{r}
+df_trans_imputed = complete(s3obj_mice_impute)
+```
+
+The summary below shows that the resulting data set longer has any missing values. Before imputation, the mean of `cust_card_count_y` is 1.03, and the mean of `cust_ip_count_y` is 1.10. 
+
+After imputation, the mean of `cust_card_count_y` is 1.02 (decrease) and the mean of `cust_ip_count_y`is 1.08 (decrease). The missing values were imputed with the typical customer profile. 
+
+
+```{r}
+skim(df_trans_imputed)
+```
+
+Assign `class` and `row_id` back to the imputed data set, and rebuild the data frame with the imputed variables.
+
+```{r}
+#assign cust_id and class back in the imputed data set
+df_trans_imputed$cust_id <- df_trans_impute_save$cust_id
+
+
+#249,516 rows (check difference is zero)
+#join(df_trans_impute_save %>% group_by(cust_id) %>% summarise(totalA=sum(trans_total_y)), 
+ # df_trans_imputed %>% group_by(cust_id) %>% summarise(totalB=sum(trans_total_y)), by=c("cust_id"="cust_id")) %>%
+  #mutate(diff=totalA-totalB) %>% summarise(sum_of_diff=sum(diff))
+
+df_trans_imputed %>% dplyr::select(trans_year, cust_id, cust_card_count_y, cust_ip_count_y) -> df_imputed_vars
+
+#remove original variables before joining imputed variables 
+df_trans$cust_card_count_y <-NULL
+df_trans$cust_ip_count_y <- NULL
+
+#join imputed variables back to the the data frame 
+inner_join(df_trans, df_imputed_vars, by=c("trans_year"="trans_year", "cust_id"="cust_id")) -> df_trans
+
+#check size is 303,853
+nrow(df_trans)  
+```
+
+```{r}
+skim(df_trans)
+```
+
+
+The function below is used to convert to season codes
+
+```{r}
+get_season <- function(month_value){
+  if(month_value >= 3 & month_value <= 5){result <- "SP"}
+  else if(month_value >= 6 & month_value <= 8){result <- "SU"}
+  else if (month_value >= 9 & month_value <= 11){result <- "FA"}
+  else{result <- "WI"} #assumes month_value is always from 1 to 12 
+  return(result)
+}
+
+get_isWeekDay <- function(dayOfWeek){
+  if(dayOfWeek >= 1 & dayOfWeek <= 5){result <- 1}
+  else{result <- 0}
+  return(result)
+}
+
+get_bhours <- function(hour){
+  if(hour >= 8 & hour <= 18){result <- 1}
+  else{result <- 0}
+  return(result)
+}
+```
+
+
+
+### Part 2 Data Transformation
+
+This section converts categorical variables into meaningful binary encoding. In addition, some of the variables are dropped.
+
+```{r}
+df_trans_save <- df_trans
+#df_trans <- df_trans_save
+```
+
+```{r}
+#add after imputation of missing data!
+#ratio of trans to card squared
+df_trans$trans_card2_ratio_y <- df_trans$trans_count_y / df_trans$cust_card_count_y^2
+
+#convert sys_source
+df_trans$source_H <- ifelse(df_trans$sys_source=="H", 1, 0)
+#df_trans$source_W <- ifelse(df_trans$sys_source=="W", 1, 0)
+df_trans$source_E <- ifelse(df_trans$sys_source=='E', 1, 0)
+
+#convert bill_loc
+df_trans$bill_loc_T <- ifelse(df_trans$bill_loc=="T*", 1, 0)
+df_trans$bill_loc_U <- ifelse(df_trans$bill_loc=="U", 1, 0)
+
+#trans_dayOfweek
+#df_trans$weekDay <- ifelse(df_trans$trans_dayOfweek >= 1 & df_trans$trans_dayOfWeek <= 5, 1, 0)
+
+df_trans$isWeekDay <- unlist(lapply(df_trans$trans_dayOfweek, get_isWeekDay))
+
+#trans_month 
+#df_trans$season <- unlist(lapply(df_trans$trans_month, get_season))
+
+df_trans$spring <- ifelse(df_trans$trans_month >= 3 & df_trans$trans_month <= 5, 1, 0)
+df_trans$summer <- ifelse(df_trans$trans_month >= 6 & df_trans$trans_month <= 8, 1, 0)
+df_trans$fall <- ifelse(df_trans$trans_month >= 9 & df_trans$trans_month <= 11, 1, 0)
+df_trans$winter <- ifelse(df_trans$trans_month==12 | df_trans$trans_month==1 | df_trans$trans_amount==2, 1, 0)
+
+#trans_hour
+df_trans$bhours <- unlist(lapply(df_trans$trans_hour, get_bhours))
+
+#drop these columns
+df_trans$cust_id <- NULL
+df_trans$trans_id <- NULL
+df_trans$row_id <- NULL
+df_trans$cust_category <- NULL #captured by sys_source
+df_trans$trans_source <- NULL #captured by sys_source
+df_trans$cust_source <- NULL #captured by sys_source
+df_trans$cust_reg_datetime <- NULL #used for age calculation
+df_trans$cust_reg_date <- NULL #used for age calculation
+df_trans$trans_day <- NULL #I can't think of anything meaningful to convert this as 
+df_trans$trans_minute <- NULL #I can't think of anything meaningful to conver this as 
+df_trans$trans_seconds <- NULL #I can't think of anything meaningful to conver this as 
+df_trans$prev_trans_datetime <- NULL #used for calculating time_delta
+df_trans$prev_trans_amount <- NULL #used for calculating amount_delta
+df_trans$trans_datetime <- NULL 
+df_trans$sys_source <- NULL #already converted
+df_trans$bill_loc <- NULL #already converted 
+df_trans$trans_dayOfweek <- NULL #already converted 
+df_trans$trans_month <- NULL #already converted
+df_trans$trans_hour <- NULL #already converted
+df_trans$trans_year <- NULL #
+df_trans$trans_date <- NULL
+
+#copy df_trans
+df_trans_s <- df_trans
+
+#scale amounts, difference, and counts
+df_trans_s$account_age <- scale(df_trans_s$account_age)
+df_trans_s$trans_amount <- scale(df_trans_s$trans_amount)
+df_trans_s$trans_total_y <- scale(df_trans_s$trans_total_y)
+df_trans_s$trans_total_d <- scale(df_trans_s$trans_total_d)
+df_trans_s$avg_trans_amount_y <- scale(df_trans_s$avg_trans_amount_y)
+df_trans_s$diff_avg_trans_amount_y <- scale(df_trans_s$diff_avg_trans_amount_y)
+df_trans_s$trans_count_y <- scale(df_trans_s$trans_count_y)
+df_trans_s$trans_count_d <- scale(df_trans_s$trans_count_d)
+df_trans_s$time_delta <- scale(df_trans_s$time_delta)
+df_trans_s$amount_delta <- scale(df_trans_s$amount_delta )
+df_trans_s$mean_time_delta_d <- scale(df_trans_s$mean_time_delta_d)
+df_trans_s$diff_mean_time_delta_d <- scale(df_trans_s$diff_mean_time_delta_d)
+df_trans_s$trans_elapsed_secs_d <- scale(df_trans_s$trans_elapsed_secs_d)
+df_trans_s$cust_card_count_y <- scale(df_trans_s$cust_card_count_y)
+df_trans_s$cust_ip_count_y <- scale(df_trans_s$cust_ip_count_y)
+df_trans_s$time_from_refDate <- scale(df_trans_s$time_from_refDate)
+df_trans_s$notShippable_total_y <- scale(df_trans_s$notShippable_total_y )
+
+names(df_trans)
+```
+
+
+Write the transformed and imputed data set to a csv file. This file will be used as input for the next step of data exploration and processing. 
+
+```{r}
+write.csv(df_trans, "Data/transformed_imputed.csv")
+write.csv(df_trans_s, "Data/transformed_imputed_scaled.csv")
+```
+
+
+---
+
+The final dataset
+
+── Data Summary ────────────────────────
+                           Values    
+Name                       df_trans_s
+Number of rows             303853    
+Number of columns          35        
+_______________________              
+Column type frequency:               
+  Date                     1         
+  factor                   1         
+  numeric                  33        
+________________________             
+Group variables            None    
+
+```{r}
+skim(df_trans_s)
+```
+
