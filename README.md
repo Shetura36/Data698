@@ -25,7 +25,7 @@ Below are the saved CSV files for the data used to generate the results publishe
 ### R Markdown Files
 
 Data 698 - Part 1 - Process Private Data
-- Input files used by this file is not published in this repository for security reasons 
+- Input files used by this process file is not published in this repository for security reasons.
 
 Data 698 - Part 2 - Data Exploration, Metrics, and Imputation
 - Input file: Data/preprocessed_transactions_anonymized.csv
