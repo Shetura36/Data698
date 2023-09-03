@@ -3,7 +3,7 @@ Sherranette O. Tinapunan </br>
 City University of New York School of Professional Studies </br>
 November 12, 2022
 
-## Paper
+## Research Paper
 [Comparative Study on Classifying Anomalous Card Transactions with Decision Trees, Random Forest, and SVM using Various Sampling Algorithms](https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
 
 ## Abstract
