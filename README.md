@@ -1,12 +1,15 @@
 # Data 698 Research Project
+Sherranette O. Tinapunan </br>
+City University of New York School of Professional Studies </br>
+November 12, 2022
 
-### Research Paper
+## Paper
 [Comparative Study on Classifying Anomalous Card Transactions with Decision Trees, Random Forest, and SVM using Various Sampling Algorithms](https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
 
-### Abstract
+## Abstract
 This research utilized anonymized real card transaction dataset from a small business organization to study the performance of Decision Trees, Random Forest, and SVM classification models with various sampling algorithms. These sampling algorithms include undersampling, a combination of undersampling and oversampling, and synthetic oversampling techniques – RWO, SMOTE, MWMOTE, and ADASYN. In addition, the raw card transaction dataset was explored to understand data patterns related to anomalous and normal behavior. The data was transformed to create metrics that could be utilized as features in the models. These features are then validated by the various models. Finally, a recommendation is made to the small business organization as to which models and sampling techniques should be investigated more for further future work.
 
-### Data Used to Generate Results Published in Research Paper
+## Data Used to Generate Results Published in Research Paper
 
 Below are the saved CSV files for the data used to generate the results published in the paper. 
 
@@ -27,7 +30,7 @@ Sampled Training Sets:
 Results:
 - [Paper Data/Results_test_train_20k_A.csv](https://github.com/Shetura36/Data698/blob/main/Paper%20Data/report%20of%20results/Results_test_train_20k_A.xlsx)
 
-### Data Processing (R Markdown)
+## Data Processing (R Markdown)
 
 [Data 698 - Part 1 - Process Private Data](https://github.com/Shetura36/Data698/blob/main/Data%20698%20-%20Part%201%20-%20Process%20Private%20Data.Rmd)
 - Input files used by this process file is not published in this repository for security reasons.
@@ -45,6 +48,7 @@ Results:
 - Results: [Published in paper](https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
 
 
-S. Tinapunan, 7/11/2022
+
+
   
 
