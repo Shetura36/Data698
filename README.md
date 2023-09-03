@@ -42,7 +42,7 @@ Results:
 
 [Data 698 - Part 4 - Modeling](https://github.com/Shetura36/Data698/blob/main/Data%20698%20-%20Part%204%20-%20Modeling.Rmd)
 - Input file: [Data/transactions_scaled_final.csv](https://github.com/Shetura36/Data698/blob/main/Data/transactions_scaled_final.csv)
-- Results: [Published in paper]((https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
+- Results: [Published in paper](https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
 
 
 S. Tinapunan, 7/11/2022
