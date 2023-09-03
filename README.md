@@ -1,7 +1,7 @@
 # Data 698 Research Project
 
-### Title
-Comparative Study on Classifying Anomalous Card Transactions with Decision Trees, Random Forest, and SVM using Various Sampling Algorithms. 
+### Research
+[Comparative Study on Classifying Anomalous Card Transactions with Decision Trees, Random Forest, and SVM using Various Sampling Algorithms](https://github.com/Shetura36/Data698/blob/main/Data%20698%20Research%20Paper.pdf)
 
 ### Abstract
 This research utilized anonymized real card transaction dataset from a small business organization to study the performance of Decision Trees, Random Forest, and SVM classification models with various sampling algorithms. These sampling algorithms include undersampling, a combination of undersampling and oversampling, and synthetic oversampling techniques – RWO, SMOTE, MWMOTE, and ADASYN. In addition, the raw card transaction dataset was explored to understand data patterns related to anomalous and normal behavior. The data was transformed to create metrics that could be utilized as features in the models. These features are then validated by the various models. Finally, a recommendation is made to the small business organization as to which models and sampling techniques should be investigated more for further future work.
